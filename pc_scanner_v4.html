@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QR取り込み（堅牢版）</title>
+  <meta name="color-scheme" content="light dark">
+  <style>
+    :root{--bg:#0b1020;--fg:#e8ecf1;--muted:#9aa4b2;--card:#111935;--acc:#4f8cff;--ok:#00c853;--warn:#ffb300;--err:#ff5252}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, Helvetica, Arial;background:var(--bg);color:var(--fg);}
+    .wrap{max-width:920px;margin:0 auto;padding:16px 18px 40px;}
+    header{display:flex;align-items:center;justify-content:space-between;padding:16px 0 8px}
+    h1{margin:0;font-weight:800}
+    .card{background:var(--card);border:1px solid #1b2447;border-radius:18px;padding:16px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    .stack{display:grid;gap:14px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    button,input,select{appearance:none;background:#17224a;border:1px solid #26305a;color:var(--fg);border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer}
+    button:hover{background:#1d2a5d}
+    button.primary{background:var(--acc);border-color:transparent;color:#fff}
+    textarea{width:100%;min-height:160px;background:#0e1430;border:1px solid #1d2750;color:var(--fg);border-radius:12px;padding:12px;font-size:15px}
+    video,canvas,img{width:100%;max-height:320px;border-radius:12px;background:#000;object-fit:contain}
+    .hint{color:var(--muted);font-size:.92rem}
+    .small{font-size:.9rem}
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+    .drop{border:2px dashed #2a356d;border-radius:12px;padding:14px;text-align:center;background:#0e1430}
+    .hidden{display:none!important}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>QR取り込み（堅牢版）</h1>
+      <div id="status" class="small">初期化中…</div>
+    </header>
+
+    <section class="card stack">
+      <div class="small hint">
+        使い方：①<strong>カメラ</strong>（HTTPS/localhost） ②<strong>画像ファイル/貼り付け</strong>（オフラインOK） ③<strong>USBリーダー</strong>（結果欄に直接入力）
+      </div>
+    </section>
+
+    <section class="card stack">
+      <div class="row">
+        <label>カメラ選択: <select id="cameraSelect"></select></label>
+        <button id="btnStart" class="primary">カメラ開始</button>
+        <button id="btnStop">停止</button>
+        <span id="secureHint" class="small"></span>
+      </div>
+      <video id="preview" autoplay playsinline></video>
+    </section>
+
+    <section class="card stack">
+      <div class="row">
+        <strong>画像から読み取り（オフラインOK）</strong>
+        <input type="file" id="filePick" accept="image/*">
+      </div>
+      <div id="drop" class="drop">ここに画像をドラッグ＆ドロップ / 画像を貼り付け（Ctrl+V）</div>
+      <img id="img" class="hidden" alt="uploaded">
+    </section>
+
+    <section class="card stack">
+      <div class="row"><strong>結果</strong>
+        <label style="margin-left:auto"><input type="checkbox" id="autoCopy" checked> 自動コピー</label>
+      </div>
+      <textarea id="result" placeholder="ここに読み取り結果が表示されます"></textarea>
+      <div class="row">
+        <button id="btnCopy">コピー</button>
+        <button id="btnClear">クリア</button>
+        <button id="btnDownload">テキスト保存</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const ZX_SOURCES = [
+      './zxing.min.js',
+      'https://unpkg.com/@zxing/library@0.20.0',
+      'https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0',
+    ];
+    function loadScriptSeq(list, onok, onfail){
+      let i=0;
+      (function next(){
+        if(i>=list.length){ onfail?.(); return; }
+        const s=document.createElement('script');
+        s.src=list[i++]; s.async=true; s.onload=()=>onok?.(); s.onerror=()=>{ s.remove(); next(); };
+        document.head.appendChild(s);
+      })();
+    }
+  </script>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const video = document.getElementById('preview');
+    const sel = document.getElementById('cameraSelect');
+    const resultEl = document.getElementById('result');
+    const autoCopy = document.getElementById('autoCopy');
+    const secureHint = document.getElementById('secureHint');
+    const filePick = document.getElementById('filePick');
+    const drop = document.getElementById('drop');
+    const img = document.getElementById('img');
+    let codeReader = null;
+    let running = false;
+
+    const isSecure = location.protocol==='https:' || location.hostname==='localhost';
+    secureHint.textContent = isSecure ? '' : '（非HTTPSのためカメラ不可。画像/USBは使用可能）';
+    statusEl.textContent = '準備完了';
+
+    async function listCameras(){
+      try{
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const vids = devices.filter(d=>d.kind==='videoinput');
+        sel.innerHTML='';
+        vids.forEach((d,i)=>{
+          const op = document.createElement('option');
+          op.value = d.deviceId || '';
+          op.textContent = d.label || `カメラ ${i+1}`;
+          sel.appendChild(op);
+        });
+      }catch(e){
+        statusEl.textContent = 'カメラ列挙に失敗: '+e.message;
+      }
+    }
+
+    async function startCamera(){
+      if(!isSecure){ statusEl.textContent='非HTTPSのためカメラは使用できません'; return; }
+      if(!window.ZXing){ statusEl.textContent='ZXingライブラリの読み込み待ちです…'; return; }
+      if(running) return;
+      running = true;
+      statusEl.textContent='読み取り中…';
+      if(!codeReader) codeReader = new ZXing.BrowserMultiFormatReader();
+      try{
+        await codeReader.decodeFromVideoDevice(sel.value || undefined, video, (result, err)=>{
+          if(result){ onDecoded(result.getText()); }
+        });
+      }catch(err){
+        statusEl.textContent = '開始失敗: '+err.message;
+        running=false;
+      }
+    }
+
+    async function stopCamera(){
+      running=false;
+      if(codeReader){ try{ await codeReader.reset(); }catch{} }
+      statusEl.textContent='停止しました';
+    }
+
+    function onDecoded(text){
+      resultEl.value = text;
+      statusEl.innerHTML = '<span class="ok">読み取り成功</span>';
+      if(autoCopy.checked){ navigator.clipboard?.writeText(text).catch(()=>{}); }
+      video.style.filter='brightness(0.7)'; setTimeout(()=>video.style.filter='',180);
+    }
+
+    async function decodeImageElement(imageEl){
+      if(!window.ZXing){
+        statusEl.textContent='ZXing未読込。画像読み取りにはライブラリが必要です。';
+        return;
+      }
+      try{
+        if(!codeReader) codeReader = new ZXing.BrowserMultiFormatReader();
+        const res = await codeReader.decodeFromImageElement(imageEl);
+        if(res){ onDecoded(res.getText()); }
+        else{ statusEl.textContent='画像からQRを見つけられませんでした'; }
+      }catch(e){
+        statusEl.textContent='デコード失敗: '+e.message;
+      }
+    }
+
+    filePick.addEventListener('change', (e)=>{
+      const file = e.target.files?.[0]; if(!file) return;
+      const url = URL.createObjectURL(file);
+      img.src = url; img.classList.remove('hidden');
+      img.onload = ()=>{ decodeImageElement(img); URL.revokeObjectURL(url); };
+    });
+    drop.addEventListener('dragover', (e)=>{ e.preventDefault(); drop.style.opacity='0.8'; });
+    drop.addEventListener('dragleave', (e)=>{ drop.style.opacity='1'; });
+    drop.addEventListener('drop', (e)=>{
+      e.preventDefault(); drop.style.opacity='1';
+      const file = e.dataTransfer.files?.[0]; if(!file) return;
+      const url = URL.createObjectURL(file);
+      img.src = url; img.classList.remove('hidden');
+      img.onload = ()=>{ decodeImageElement(img); URL.revokeObjectURL(url); };
+    });
+    window.addEventListener('paste', async (e)=>{
+      const items = e.clipboardData?.items || [];
+      for(const it of items){
+        if(it.type.startsWith('image/')){
+          const file = it.getAsFile();
+          const url = URL.createObjectURL(file);
+          img.src = url; img.classList.remove('hidden');
+          img.onload = ()=>{ decodeImageElement(img); URL.revokeObjectURL(url); };
+          e.preventDefault();
+          break;
+        }
+      }
+    });
+
+    document.getElementById('btnStart').addEventListener('click', startCamera);
+    document.getElementById('btnStop').addEventListener('click', stopCamera);
+    document.getElementById('btnCopy').addEventListener('click', ()=>navigator.clipboard?.writeText(resultEl.value));
+    document.getElementById('btnClear').addEventListener('click', ()=>{ resultEl.value=''; statusEl.textContent='クリアしました'; });
+    document.getElementById('btnDownload').addEventListener('click', ()=>{
+      const blob = new Blob([resultEl.value||''], {type:'text/plain;charset=utf-8'});
+      const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='scanned_text.txt'; a.click(); URL.revokeObjectURL(a.href);
+    });
+
+    (async()=>{
+      if(navigator.mediaDevices?.getUserMedia){ await listCameras(); }
+      loadScriptSeq(ZX_SOURCES, ()=>{ statusEl.textContent='準備完了（ZXing読込済）'; }, ()=>{ statusEl.textContent='ZXingの読み込みに失敗（CDNブロックの可能性）'; });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>音声→要約→QR（堅牢版）</title>
+  <meta name="color-scheme" content="light dark">
+  <style>
+    :root{--bg:#0b1020;--fg:#e8ecf1;--muted:#9aa4b2;--card:#111935;--acc:#4f8cff;--ok:#00c853;--warn:#ffb300;--err:#ff5252}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, Helvetica, Arial;background:var(--bg);color:var(--fg)}
+    .wrap{max-width:950px;margin:0 auto;padding:16px 18px 40px}
+    header{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:16px 0 8px}
+    h1{margin:0;font-weight:800}
+    .card{background:var(--card);border:1px solid #1b2447;border-radius:18px;padding:16px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+    .stack{display:grid;gap:14px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    button,input,select{appearance:none;background:#17224a;border:1px solid #26305a;color:var(--fg);border-radius:12px;padding:10px 14px;font-weight:600}
+    button{cursor:pointer} button:hover{background:#1d2a5d}
+    button.primary{background:var(--acc);border-color:transparent;color:#fff}
+    button.ghost{background:transparent;border-color:#2a356d}
+    .pill{font-size:.9rem;color:var(--muted)}
+    textarea{width:100%;min-height:160px;background:#0e1430;border:1px solid #1d2750;color:var(--fg);border-radius:12px;padding:12px;font-size:15px}
+    .transcript{min-height:120px;white-space:pre-wrap;background:#0e1430;border:1px solid #1d2750;border-radius:12px;padding:12px}
+    .qr{display:grid;place-items:center;background:#0e1430;border:1px dashed #2a356d;border-radius:14px;min-height:220px}
+    .hint{color:var(--muted);font-size:.92rem}
+    .small{font-size:.9rem}
+    .ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)}
+    .hidden{display:none!important}
+    @media(min-width:800px){.grid-2{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>音声 → 要約 → QR（堅牢版）</h1>
+      <div class="pill" id="env"></div>
+    </header>
+
+    <section class="card stack">
+      <div id="alert" class="err hidden"></div>
+      <div class="small hint">
+        音声認識は <strong>HTTPS/localhost</strong> のみ対応。動かない場合はテキスト欄でキーボードの🎤をご利用ください。
+      </div>
+    </section>
+
+    <section class="card grid-2">
+      <div class="stack">
+        <div class="row">
+          <div class="pill">文字起こし</div>
+          <button id="btnStart" class="primary">● 音声認識</button>
+          <button id="btnStop">■ 停止</button>
+        </div>
+        <div id="transcript" class="transcript" aria-live="polite"></div>
+        <div class="row">
+          <button id="btnClear" class="ghost">↺ クリア</button>
+          <label class="pill small">自動句点 <input id="autoPunct" type="checkbox" checked></label>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="row"><div class="pill">抽出型要約（端末内 / 無料）</div></div>
+        <textarea id="summary" placeholder="ここに要約が出ます（手動編集可）。空の場合は文字起こしから要約します。"></textarea>
+        <div class="row">
+          <label class="pill small">要約文数: <input id="sentCount" type="number" min="1" max="8" value="3" style="width:80px"></label>
+          <button id="btnSumm">要約する</button>
+          <button id="btnCopy">コピー</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card grid-2">
+      <div class="stack">
+        <div class="row"><div class="pill">QRコード生成</div></div>
+        <div id="qr" class="qr"></div>
+        <div class="row">
+          <label class="pill small">最大文字数（約）: <input id="maxChars" type="number" min="120" max="1200" value="800" style="width:92px"></label>
+          <button id="btnQR" class="primary">QRを作成</button>
+          <button id="btnDL" class="ghost">PNG保存</button>
+        </div>
+        <div id="qrNote" class="hint small"></div>
+      </div>
+
+      <div class="stack">
+        <div class="row"><div class="pill">Tips</div></div>
+        <ul class="small" style="margin:0 0 6px 18px;padding:0">
+          <li>400〜800字以内だと読み取り安定。</li>
+          <li>CDNブロック環境では外部QR APIで代替生成します（下記に表示）。</li>
+        </ul>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    // --- Multi-CDN loader for qrcode ---
+    const QR_SOURCES = [
+      './qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js',
+      'https://unpkg.com/qrcode@1.5.3/build/qrcode.min.js',
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcode/1.5.3/qrcode.min.js'
+    ];
+    function loadScriptSeq(list, onok, onfail){
+      let i=0;
+      (function next(){
+        if(i>=list.length){ onfail?.(); return; }
+        const s=document.createElement('script');
+        s.src=list[i++]; s.async=true; s.onload=()=>onok?.(); s.onerror=()=>{ s.remove(); next(); };
+        document.head.appendChild(s);
+      })();
+    }
+  </script>
+
+  <script>
+    const $ = s=>document.querySelector(s);
+    const env = $("#env"), alertBox=$("#alert");
+    const transcriptEl=$("#transcript"), summaryEl=$("#summary"), qrEl=$("#qr");
+    const sentCountEl=$("#sentCount"), autoPunctEl=$("#autoPunct"), maxCharsEl=$("#maxChars");
+    let recog=null, fullText="", interimText="", qrCanvas=null;
+
+    const isSecure = location.protocol==='https:' || location.hostname==='localhost';
+    env.textContent = (isSecure? 'HTTPS/localhost：OK' : '非HTTPS：音声認識は不可');
+
+    function showError(msg){ alertBox.textContent=msg; alertBox.classList.remove('hidden'); }
+    function clearError(){ alertBox.classList.add('hidden'); alertBox.textContent=''; }
+
+    // Speech
+    function supportsSR(){ return 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window; }
+    function initSR(){
+      if(!supportsSR()){ showError('このブラウザは Web Speech API に未対応です。'); return; }
+      if(!isSecure){ showError('音声認識は HTTPS / localhost でのみ動作します。'); }
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recog = new SR(); recog.lang='ja-JP'; recog.interimResults=true; recog.continuous=true;
+      recog.onresult=(e)=>{
+        interimText='';
+        for(let i=e.resultIndex;i<e.results.length;i++){
+          const res=e.results[i];
+          if(res.isFinal){
+            let t=res[0].transcript.trim();
+            if(autoPunctEl.checked && !/[。.!?！？]$/.test(t)) t+='。';
+            fullText += (fullText ? '' : '') + t;
+          }else{
+            interimText += res[0].transcript;
+          }
+        }
+        renderTranscript();
+      };
+      recog.onerror=(e)=>{ showError('音声認識エラー: '+e.error); };
+      recog.onend=()=>{ $("#btnStart").disabled=false; $("#btnStop").disabled=true; };
+    }
+    function renderTranscript(){
+      const txt = (fullText || '') + (interimText? ('\\n【途中】'+interimText) : '');
+      transcriptEl.textContent = txt.trim();
+    }
+    function startSR(){
+      clearError();
+      if(!recog){ showError('音声認識が初期化されていません。'); return; }
+      try{ recog.start(); $("#btnStart").disabled=true; $("#btnStop").disabled=false; }catch(err){ showError('開始できません: '+err.message); }
+    }
+    function stopSR(){ try{ recog?.stop(); }catch{} $("#btnStart").disabled=false; $("#btnStop").disabled=true; }
+    function clearAll(){ clearError(); fullText=''; interimText=''; renderTranscript(); summaryEl.value=''; qrEl.innerHTML=''; $("#qrNote").textContent=''; qrCanvas=null; }
+
+    // Summarizer
+    function splitSentences(text){
+      const out=[]; let b='';
+      for(const ch of text){ b+=ch; if(/[。！？!?]/.test(ch)){ out.push(b.trim()); b=''; } }
+      if(b.trim()) out.push(b.trim());
+      if(out.length<=1){ return text.split(/\\n+/).map(s=>s.trim()).filter(Boolean); }
+      return out;
+    }
+    function bigrams(s){
+      const cleaned=s.replace(/[^\\p{Letter}\\p{Number}]/gu,'');
+      const out=[]; for(let i=0;i<cleaned.length-1;i++){ out.push(cleaned.slice(i,i+2)); }
+      return out.length?out:(cleaned?[cleaned]:[]);
+    }
+    function summarize(text,k=3,maxChars=800){
+      const sents=splitSentences(text).filter(Boolean);
+      if(!sents.length) return '';
+      const tf=sents.map(()=>Object.create(null)); const df=Object.create(null);
+      sents.forEach((s,idx)=>{ const toks=bigrams(s); const seen=new Set();
+        toks.forEach(t=>{ tf[idx][t]=(tf[idx][t]||0)+1; if(!seen.has(t)){df[t]=(df[t]||0)+1; seen.add(t);} });
+      });
+      const N=sents.length;
+      const scores=sents.map((s,i)=>{
+        let sc=0; for(const t in tf[i]){ const idf=Math.log((N+1)/((df[t]||1))); sc+=tf[i][t]*idf; }
+        const lenP = Math.log(50+s.length)/Math.log(50+80);
+        const pos = 1.0 + ((N-i)/(N*12));
+        return sc*(1/lenP)*pos;
+      });
+      const idxs=scores.map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]).slice(0,Math.min(k,sents.length)).map(p=>p[1]).sort((a,b)=>a-b);
+      let out=idxs.map(i=>sents[i]).join('\\n');
+      if(out.length>maxChars) out=out.slice(0,maxChars-1)+'…';
+      return out;
+    }
+
+    // QR
+    function generateQRWithLib(text){
+      return new Promise((resolve,reject)=>{
+        try{
+          const canvas=document.createElement('canvas');
+          QRCode.toCanvas(canvas, text, {errorCorrectionLevel:'M', margin:2, scale:6}, (err)=>{
+            if(err){ reject(err); return; }
+            qrEl.innerHTML=''; qrEl.appendChild(canvas); qrCanvas=canvas; resolve();
+          });
+        }catch(e){ reject(e); }
+      });
+    }
+    function generateQRViaImage(text){
+      return new Promise((resolve,reject)=>{
+        const providers=[
+          `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(text)}`,
+          `https://quickchart.io/qr?size=320&text=${encodeURIComponent(text)}`
+        ];
+        let i=0;
+        const tryNext=()=>{
+          if(i>=providers.length){ reject(new Error('すべての外部QRサービスが失敗しました')); return; }
+          const img=new Image(); img.referrerPolicy='no-referrer';
+          img.onload=()=>{ qrEl.innerHTML=''; qrEl.appendChild(img); $("#qrNote").textContent='外部サービスで生成しました。'; qrCanvas=null; resolve(); };
+          img.onerror=()=>{ i++; tryNext(); };
+          img.src=providers[i];
+        };
+        tryNext();
+      });
+    }
+
+    async function makeQR(text){
+      clearError();
+      qrEl.innerHTML=''; qrCanvas=null;
+      const maxChars=parseInt(maxCharsEl.value||'800',10);
+      let t=(text||'').trim();
+      if(!t){ t = transcriptEl.textContent.replace(/【途中】.*/g,'').trim(); }
+      if(!t){ showError('QR化できるテキストがありません。'); return; }
+      if(t.length>maxChars){ $("#qrNote").innerHTML='長文のため <span class="warn">自動トリム</span>（'+maxChars+'字）'; t=t.slice(0,maxChars-1)+'…'; }
+      else { $("#qrNote").textContent='OK：'+t.length+' 文字'; }
+
+      if(window.QRCode){ try{ await generateQRWithLib(t); return; }catch(e){} }
+      try{ await generateQRViaImage(t); }
+      catch(e){ showError('QR生成に失敗しました。ネットワークまたは外部サービスをご確認ください。'); }
+    }
+    function downloadQR(){ if(!qrCanvas) return; const a=document.createElement('a'); a.download='summary-qr.png'; a.href=qrCanvas.toDataURL('image/png'); a.click(); }
+
+    // events
+    $("#btnStart").addEventListener('click', startSR);
+    $("#btnStop").addEventListener('click', stopSR);
+    $("#btnClear").addEventListener('click', clearAll);
+    $("#btnCopy").addEventListener('click', ()=>navigator.clipboard?.writeText(summaryEl.value).catch(()=>{}));
+    $("#btnSumm").addEventListener('click', ()=>{
+      clearError();
+      const k=Math.max(1,Math.min(8,parseInt(sentCountEl.value||'3',10)));
+      const base = (summaryEl.value || transcriptEl.textContent.replace(/【途中】.*/g,'')).trim();
+      if(!base){ showError('要約元テキストがありません。'); return; }
+      summaryEl.value = summarize(base, k, parseInt(maxCharsEl.value||'800',10));
+    });
+    $("#btnQR").addEventListener('click', ()=> makeQR(summaryEl.value));
+    $("#btnDL").addEventListener('click', downloadQR);
+
+    // Init
+    if(supportsSR() && isSecure){ initSR(); }
+    // Load QR lib (multi-CDN)
+    loadScriptSeq(QR_SOURCES, ()=>{}, ()=>{});
+  </script>
+</body>
+</html>
